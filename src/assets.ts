@@ -5,7 +5,7 @@
 import { Assets, Rectangle, Texture } from "pixi.js";
 import type { TeamColor } from "./config";
 
-const BASE = "/assets";
+const BASE = `${import.meta.env.BASE_URL}assets`.replace(/\/{2,}/g, "/");
 
 // Map color to folder slug used in copied paths
 const C: Record<TeamColor, string> = {
