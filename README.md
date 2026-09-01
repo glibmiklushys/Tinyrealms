@@ -1,5 +1,7 @@
 # Tiny Realms
 
+**[Play in the browser](https://glibmiklushys.github.io/Tinyrealms/)** · TypeScript · Pixi.js · deterministic 2D RTS
+
 A 2D real-time strategy skirmish game built on a **deterministic, command-driven simulation**. You vs an AI opponent. Gather wood and gold, build castles, train warriors and archers, and crush the enemy keep.
 
 The architecture is intentionally **multiplayer-ready**: every player input becomes a `Command`, the simulation is a pure function of `(state, commands)` evaluated at a fixed 30 Hz tick, and a small `Network` interface sits in the only place where commands enter the loop. Dropping in WebRTC lockstep netplay later is a focused change.
@@ -116,7 +118,7 @@ RTS games push thousands of small unit updates and have very wide game state —
 
 ## Asset credits
 
-This project uses the **Tiny Swords**-style 2D RTS asset pack supplied at `C:\Users\Viper\Documents\2d_game`. PNGs were copied to `public/assets/` with normalized paths (lowercase, underscores).
+This project uses a Tiny Swords-style 2D RTS asset pack. PNGs live in `public/assets/` with normalized paths (lowercase, underscores).
 
 ## Things that would be nice next
 
