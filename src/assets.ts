@@ -218,6 +218,63 @@ async function loadAnim(def: AnimDef): Promise<LoadedAnim> {
   return { textures, fps: def.fps, loop: def.loop ?? true, frameW: def.frameW, frameH: def.frameH };
 }
 
+const LOAD_CONCURRENCY = 6;
+const LOAD_TRIES = 3;
+
+function isRetryableLoadError(err: unknown): boolean {
+  const msg = err instanceof Error ? `${err.message} ${err}` : String(err);
+  return /503|429|Failed to fetch|Load failed|NetworkError|net::ERR/i.test(msg);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function withRetry<T>(fn: () => Promise<T>, tries = LOAD_TRIES): Promise<T> {
+  let last: unknown;
+  for (let attempt = 0; attempt < tries; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      last = err;
+      if (attempt === tries - 1 || !isRetryableLoadError(err)) throw err;
+      await sleep(400 * 2 ** attempt);
+    }
+  }
+  throw last;
+}
+
+async function mapPool<T>(items: T[], limit: number, fn: (item: T) => Promise<void>): Promise<void> {
+  let next = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (true) {
+      const i = next++;
+      if (i >= items.length) return;
+      await fn(items[i]);
+    }
+  });
+  await Promise.all(workers);
+}
+
+function enqueueTeamAssets(
+  color: TeamColor,
+  animDefs: AnimDef[],
+  textureUrls: Set<string>,
+) {
+  const ua = unitAnims(color);
+  for (const k of Object.keys(ua) as (keyof typeof ua)[]) {
+    const states = ua[k] as Record<string, AnimDef>;
+    for (const stateName of Object.keys(states)) {
+      const def = states[stateName];
+      if (def.frames > 1) animDefs.push(def);
+      else textureUrls.add(def.url);
+    }
+  }
+  const paths = buildingPaths(color);
+  for (const k of Object.keys(paths) as (keyof typeof paths)[]) textureUrls.add(paths[k]);
+  return ua;
+}
+
 export async function loadAllAssets(onProgress: (p: number) => void): Promise<AssetCache> {
   const anims = new Map<string, LoadedAnim>();
   const textures = new Map<string, Texture>();
@@ -226,19 +283,18 @@ export async function loadAllAssets(onProgress: (p: number) => void): Promise<As
   const animDefs: AnimDef[] = [];
   const textureUrls = new Set<string>();
 
-  const teams: TeamColor[] = ["blue", "red", "yellow", "purple", "black"];
+  // Skirmish is two teams: main.ts makes You=blue / Foe=red; worldgen only
+  // spawns owners 0 and 1. Yellow/purple/black exist as TeamColor folders
+  // but are not used at startup (renderer playerColor maps extra owners to
+  // yellow, which we alias to blue textures below without extra fetches).
+  const preloadTeams: TeamColor[] = ["blue", "red"];
+  const allTeams: TeamColor[] = ["blue", "red", "yellow", "purple", "black"];
   const allUnitAnims: Record<TeamColor, ReturnType<typeof unitAnims>> = {} as any;
-  for (const t of teams) {
-    const ua = unitAnims(t);
-    allUnitAnims[t] = ua;
-    for (const k of Object.keys(ua) as (keyof typeof ua)[]) {
-      const states = ua[k] as Record<string, AnimDef>;
-      for (const stateName of Object.keys(states)) {
-        const def = states[stateName];
-        if (def.frames > 1) animDefs.push(def);
-        else textureUrls.add(def.url);
-      }
-    }
+  for (const t of preloadTeams) {
+    allUnitAnims[t] = enqueueTeamAssets(t, animDefs, textureUrls);
+  }
+  for (const t of allTeams) {
+    if (!allUnitAnims[t]) allUnitAnims[t] = unitAnims(t);
   }
 
   // FX
@@ -265,13 +321,8 @@ export async function loadAllAssets(onProgress: (p: number) => void): Promise<As
   animDefs.push(RESOURCES_ASSETS.sheep.move as AnimDef);
   animDefs.push(RESOURCES_ASSETS.sheep.grass as AnimDef);
 
-  // Buildings (single textures)
+  // Buildings (single textures) — queued inside enqueueTeamAssets for preload teams
   const buildings: any = {};
-  for (const t of teams) {
-    const paths = buildingPaths(t);
-    buildings[t] = {};
-    for (const k of Object.keys(paths) as (keyof typeof paths)[]) textureUrls.add(paths[k]);
-  }
 
   // UI
   Object.values(UI_ASSETS).forEach(v => {
@@ -283,27 +334,32 @@ export async function loadAllAssets(onProgress: (p: number) => void): Promise<As
   let done = 0;
   const tick = () => { done++; onProgress(done / total); };
 
-  // load in parallel
-  await Promise.all([
-    ...animDefs.map(async d => {
-      const a = await loadAnim(d);
+  type Job = () => Promise<void>;
+  const jobs: Job[] = [
+    ...animDefs.map(d => async () => {
+      const a = await withRetry(() => loadAnim(d));
       anims.set(d.url, a);
       tick();
     }),
-    ...[...textureUrls].map(async url => {
-      const tex = await Assets.load(url) as Texture;
+    ...[...textureUrls].map(url => async () => {
+      const tex = await withRetry(() => Assets.load(url) as Promise<Texture>);
       textures.set(url, tex);
       tick();
     }),
-  ]);
+  ];
+
+  await mapPool(jobs, LOAD_CONCURRENCY, job => job());
 
   // populate building textures
-  for (const t of teams) {
+  for (const t of preloadTeams) {
     const paths = buildingPaths(t);
     buildings[t] = {} as any;
     for (const k of Object.keys(paths) as (keyof typeof paths)[]) {
       buildings[t][k] = textures.get(paths[k])!;
     }
+  }
+  for (const t of allTeams) {
+    if (!buildings[t]) buildings[t] = buildings.blue;
   }
 
   return { anims, textures, unitAnims: allUnitAnims, buildings };
